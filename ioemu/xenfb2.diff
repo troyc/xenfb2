@@ -1,0 +1,625 @@
+diff --git a/hw/fb2if.h b/hw/fb2if.h
+new file mode 100644
+index 0000000..8863c0b
+--- /dev/null
++++ b/hw/fb2if.h
+@@ -0,0 +1,89 @@
++#ifndef __FB2IF_H__
++#define __FB2IF_H__
++
++/* Out events (frontend -> backend) */
++
++#define XENFB2_TYPE_MODE_REQUEST 1
++#define XENFB2_TYPE_RESIZE 2
++
++struct xenfb2_mode
++{
++    uint8_t type; /* XENFB2_TYPE_MODE_REQUEST || XENFB2_TYPE_RESIZE */
++
++    unsigned int xres;
++    unsigned int yres;
++    unsigned int bpp;
++};
++
++#define XENFB2_OUT_EVENT_SIZE 40
++
++union xenfb2_out_event
++{
++    uint8_t type;
++    struct xenfb2_mode mode;
++    char pad[XENFB2_OUT_EVENT_SIZE];
++};
++
++/* In events (backend -> frontend) */
++
++#define XENFB2_TYPE_MODE_REPLY 1
++
++struct xenfb2_mode_rep
++{
++    uint8_t type; /* XENFB2_TYPE_MODE_REPLY */
++
++    unsigned int pitch;
++    int mode_ok;
++};
++
++#define XENFB2_TYPE_UPDATE_FB2M 2
++
++struct xenfb2_update_fb2m
++{
++    uint8_t type; /* XENFB2_TYPE_UPDATE_FB2M */
++
++    unsigned int start;
++    unsigned int end; /* Inclusive */
++};
++
++#define XENFB2_IN_EVENT_SIZE 40
++
++union xenfb2_in_event
++{
++    uint8_t type;
++    struct xenfb2_mode_rep mode_reply;
++    struct xenfb2_update_fb2m update_fb2m;
++    char pad[XENFB2_IN_EVENT_SIZE];
++};
++
++/* shared page */
++
++#define XENFB2_IN_RING_SIZE 1024
++#define XENFB2_IN_RING_LEN (XENFB2_IN_RING_SIZE / XENFB2_IN_EVENT_SIZE)
++#define XENFB2_IN_RING_OFFS 1024
++#define XENFB2_IN_RING(page) \
++    ((union xenfb2_in_event *)((char *)(page) + XENFB2_IN_RING_OFFS))
++#define XENFB2_IN_RING_REF(page, idx) \
++    (XENFB2_IN_RING((page))[(idx) % XENFB2_IN_RING_LEN])
++
++#define XENFB2_OUT_RING_SIZE 2048
++#define XENFB2_OUT_RING_LEN (XENFB2_OUT_RING_SIZE / XENFB2_OUT_EVENT_SIZE)
++#define XENFB2_OUT_RING_OFFS (XENFB2_IN_RING_OFFS + XENFB2_IN_RING_SIZE)
++#define XENFB2_OUT_RING(page) \
++    ((union xenfb2_out_event *)((char *)(page) + XENFB2_OUT_RING_OFFS))
++#define XENFB2_OUT_RING_REF(page, idx) \
++    (XENFB2_OUT_RING((page))[(idx) % XENFB2_OUT_RING_LEN])
++
++struct xenfb2_page
++{
++  uint32_t in_cons, in_prod;
++  uint32_t out_cons, out_prod;
++
++
++  unsigned long     fb_size;
++  unsigned long     fb2m[16];
++  unsigned long     fb2m_nents;
++};
++
++#endif /* __FB2IF_H__ */
++
+diff --git a/hw/xen_backend.h b/hw/xen_backend.h
+index 9b2554f..11eead9 100644
+--- a/hw/xen_backend.h
++++ b/hw/xen_backend.h
+@@ -88,9 +88,13 @@ void xen_be_printf(struct XenDevice *xendev, int msg_level, const char *fmt, ...
+ extern struct XenDevOps xen_console_ops;      /* xen_console.c     */
+ extern struct XenDevOps xen_kbdmouse_ops;     /* xen_framebuffer.c */
+ extern struct XenDevOps xen_framebuffer_ops;  /* xen_framebuffer.c */
++extern struct XenDevOps xenfb2_ops;
+ 
+ void xen_set_display(int domid);
++void xenfb2_set_display(int domid);
+ uint64_t *xenfb_get_fbmfns(int *fbpages);
+ void *xenfb_get_pixels(void);
++uint64_t *xenfb2_get_fbmfns(int *fbpages);
++void *xenfb2_get_pixels(void);
+ 
+ #endif /* QEMU_HW_XEN_BACKEND_H */
+diff --git a/hw/xen_machine_pv.c b/hw/xen_machine_pv.c
+index 6bfafbb..95dd031 100644
+--- a/hw/xen_machine_pv.c
++++ b/hw/xen_machine_pv.c
+@@ -68,10 +68,10 @@ static void xen_init_pv(ram_addr_t ram_size, int vga_ram_size,
+     }
+     xen_be_register("console", &xen_console_ops);
+     xen_be_register("vkbd", &xen_kbdmouse_ops);
+-    xen_be_register("vfb", &xen_framebuffer_ops);
++    xen_be_register("vfb", &xenfb2_ops);
+ 
+     /* setup framebuffer */
+-    xen_set_display(xen_domid);
++    xenfb2_set_display(xen_domid);
+ }
+ 
+ QEMUMachine xenpv_machine = {
+diff --git a/hw/xenfb.c b/hw/xenfb.c
+index 2c1bf6c..1fbb59c 100644
+--- a/hw/xenfb.c
++++ b/hw/xenfb.c
+@@ -1078,6 +1078,21 @@ struct XenDevOps xen_framebuffer_ops = {
+     .frontend_changed = fb_frontend_changed,
+ };
+ 
++void xenkbd_set_display_type(int domid, DisplayState *ds)
++{
++    struct XenDevice *xendev;
++    struct common *c;
++
++    xendev = xen_be_find_xendev("vkbd", domid, 0);
++    if (!xendev)
++	return;
++    c = container_of(xendev, struct common, xendev);
++    c->ds = ds;
++    xen_be_printf(xendev, 1, "ds is %p\n", ds);
++    /* retry ->init() */
++    xen_be_check_state(xendev);
++}
++
+ static void xen_set_display_type(int domid, const char *type, DisplayState *ds)
+ {
+     struct XenDevice *xendev;
+diff --git a/hw/xenfb2.c b/hw/xenfb2.c
+new file mode 100644
+index 0000000..bb04820
+--- /dev/null
++++ b/hw/xenfb2.c
+@@ -0,0 +1,420 @@
++
++#include <stdarg.h>
++#include <stdlib.h>
++#include <sys/types.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <stdbool.h>
++#include <sys/mman.h>
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++#include <time.h>
++
++#include <xs.h>
++#include <xenctrl.h>
++#include <xen/event_channel.h>
++#include <xen/io/xenbus.h>
++#include "fb2if.h"
++
++#include "hw.h"
++#include "sysemu.h"
++#include "console.h"
++#include "qemu-char.h"
++#include "xen_backend.h"
++
++struct XenFB {
++    struct XenDevice        xendev;  /* must be first */
++    void                    *page;
++
++    void                    *pixels;
++    unsigned long           fb_npages;
++    xen_pfn_t               *fb2m;
++    unsigned long           fb2m_size;
++
++    union xenfb2_in_event   *evt_reply;
++
++    int                     bug_trigger;
++
++    unsigned int            xres;
++    unsigned int            yres;
++    unsigned int            bpp;
++    unsigned int            linesize;
++
++    /* XXX: To be removed soon */
++    DisplayState            *ds;
++};
++
++static unsigned int xenfb_get_linesize(struct XenFB *fb, unsigned int xres,
++                                       unsigned int yres, unsigned int bpp)
++{
++    /* XXX IMPLEMENT LFB SUPPORT HERE */
++
++    return xres * (bpp / 8);
++    /* return 0 in case of invalid mode */
++}
++
++static int xenfb_map_fb(struct XenFB *fb)
++{
++    struct xenfb2_page *page = fb->page;
++
++    if (fb->pixels) {
++        munmap(fb->pixels, fb->fb_npages * XC_PAGE_SIZE);
++        fb->pixels = NULL;
++    }
++    if (fb->fb2m) {
++        munmap(fb->fb2m, fb->fb2m_size);
++        fb->fb2m = NULL;
++    }
++
++    fb->fb_npages = page->fb2m_nents;
++    fb->fb2m_size = (page->fb2m_nents * sizeof (xen_pfn_t) + (XC_PAGE_SIZE - 1)) &
++                    ~(XC_PAGE_SIZE - 1);
++
++    fb->fb2m = xc_map_foreign_pages(xen_xc, fb->xendev.dom,
++                                    PROT_READ | PROT_WRITE,
++                                    page->fb2m, fb->fb2m_size / XC_PAGE_SIZE);
++    if (fb->fb2m == NULL) {
++        fprintf(stderr, "FB2M table mapping failed.\n");
++        return -1;
++    }
++
++    /* XXX: Be careful to map FB with the same caching attributes as the guest */
++    /* XXX: Mapping FB soon won't be necessary when this code is to be moved
++     * out of qemu
++     */
++    fb->pixels = xc_map_foreign_batch_cacheattr(xen_xc, fb->xendev.dom,
++                                                PROT_READ | PROT_WRITE,
++                                                fb->fb2m, fb->fb_npages,
++                                                XC_MAP_CACHEATTR_WT);
++    if (fb->pixels == NULL) {
++        fprintf(stderr, "Framebuffer mapping failed.\n");
++        munmap(fb->fb2m, fb->fb2m_size);
++        fb->fb2m = NULL;
++        return -1;
++    }
++
++    return 0;
++}
++
++static void xenfb_resize(struct XenFB *fb, struct xenfb2_mode *mode)
++{
++    unsigned int linesize;
++
++    fprintf(stderr, "RESIZE. w:%d, h:%d, bpp:%d\n",
++                  mode->xres, mode->yres, mode->bpp);
++
++    linesize = xenfb_get_linesize(fb, mode->xres, mode->yres, mode->bpp);
++    if (linesize == 0) {
++        fprintf(stderr, "RESIZE FAILED: Invalid mode\n");
++        return;
++    }
++
++    fb->xres = mode->xres;
++    fb->yres = mode->yres;
++    fb->bpp = mode->bpp;
++    fb->linesize = linesize;
++}
++
++static void xenfb_check_mode(struct XenFB *fb, struct xenfb2_mode *mode)
++{
++    unsigned int linesize;
++
++    fprintf(stderr, "MODE REQUEST. w:%d, h:%d, bpp:%d\n",
++                  mode->xres, mode->yres, mode->bpp);
++
++    fb->evt_reply = qemu_mallocz(sizeof (union xenfb2_in_event));
++    fb->evt_reply->type = XENFB2_TYPE_MODE_REPLY;
++
++    linesize = xenfb_get_linesize(fb, mode->xres, mode->yres, mode->bpp);
++
++    fb->evt_reply->mode_reply.pitch = linesize;
++    fb->evt_reply->mode_reply.mode_ok = !!linesize;
++
++    fprintf(stderr, "MODE REPLY. ok:%d, pitch:%d\n",
++                  !!linesize, linesize);
++}
++
++static void xenfb_send_event(struct XenFB *fb, union xenfb2_in_event *event)
++{
++    uint32_t prod;
++    struct xenfb2_page *page = fb->page;
++
++    prod = page->in_prod;
++    /* caller ensures !xenfb_queue_full() */
++    xen_mb();                   /* ensure ring space available */
++    XENFB2_IN_RING_REF(page, prod) = *event;
++    xen_wmb();                  /* ensure ring contents visible */
++    page->in_prod = prod + 1;
++
++    xen_be_send_notify(&fb->xendev);
++}
++
++static void xenfb_handle_events(struct XenFB *fb)
++{
++    uint32_t prod, cons;
++    struct xenfb2_page *page = fb->page;
++
++    prod = page->out_prod;
++    if (prod == page->out_cons)
++	return;
++    xen_rmb();		/* ensure we see ring contents up to prod */
++    for (cons = page->out_cons; cons != prod; cons++) {
++	union xenfb2_out_event *event = &XENFB2_OUT_RING_REF(page, cons);
++
++	switch (event->type) {
++        case XENFB2_TYPE_MODE_REQUEST:
++            xenfb_check_mode(fb, &event->mode);
++            break;
++        case XENFB2_TYPE_RESIZE:
++            xenfb_resize(fb, &event->mode);
++            break;
++	}
++    }
++    xen_mb();		/* ensure we're done with ring contents */
++    page->out_cons = cons;
++}
++
++
++static int fb_bind(struct XenFB *fb)
++{
++    int mfn;
++
++    if (-1 == xenstore_read_fe_int(&fb->xendev, "page-ref", &mfn))
++	return -1;
++    if (-1 == xenstore_read_fe_int(&fb->xendev, "event-channel", &fb->xendev.remote_port))
++	return -1;
++
++    fb->page = xc_map_foreign_range(xen_xc, fb->xendev.dom,
++				    XC_PAGE_SIZE,
++				    PROT_READ | PROT_WRITE, mfn);
++    if (NULL == fb->page)
++	return -1;
++
++    xen_be_bind_evtchn(&fb->xendev);
++    fprintf(stderr, "ring mfn %d, remote-port %d, local-port %d\n",
++		  mfn, fb->xendev.remote_port, fb->xendev.local_port);
++
++    return 0;
++}
++
++static void fb_unbind(struct XenFB *fb)
++{
++    xen_be_unbind_evtchn(&fb->xendev);
++    if (fb->page) {
++	munmap(fb->page, XC_PAGE_SIZE);
++	fb->page = NULL;
++    }
++}
++
++static int fb_init(struct XenDevice *xendev)
++{
++    struct XenFB *fb = container_of(xendev, struct XenFB, xendev);
++
++    /*
++     * XXX: Can we garantee this is executed before the driver's probe()
++     * function ?
++     */
++    xenstore_write_be_int(xendev, "default-xres", 1280);
++    xenstore_write_be_int(xendev, "default-yres", 1024);
++    xenstore_write_be_int(xendev, "default-bpp", 32);
++    xenstore_write_be_int(xendev, "default-pitch", 4096);
++
++    xenstore_write_be_int(xendev, "videoram", 16 * 1024 * 1024);
++
++    return 0;
++}
++
++static int fb_connect(struct XenDevice *xendev)
++{
++    struct XenFB *fb = container_of(xendev, struct XenFB, xendev);
++    struct xenfb2_page *shared_page;
++    int rc;
++
++    rc = fb_bind(fb);
++    if (0 != rc)
++	return rc;
++
++    shared_page = fb->page;
++
++    rc = xenfb_map_fb(fb);
++    if (0 != rc)
++	return rc;
++
++    return 0;
++}
++
++static void fb_disconnect(struct XenDevice *xendev)
++{
++    struct XenFB *fb = container_of(xendev, struct XenFB, xendev);
++
++    /* Replacing mappings with anonymous memory to release the guest pages */
++    if (fb->pixels) {
++        fb->pixels = mmap(fb->pixels, fb->fb_npages * XC_PAGE_SIZE,
++                          PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON,
++                          -1, 0);
++    }
++    if (fb->fb2m) {
++        fb->fb2m = mmap(fb->fb2m, fb->fb2m_size,
++                        PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON,
++                        -1, 0);
++    }
++
++    fb_unbind(fb);
++    fb->bug_trigger    = 0;
++}
++
++static void fb_event(struct XenDevice *xendev)
++{
++    struct XenFB *fb = container_of(xendev, struct XenFB, xendev);
++
++    xenfb_handle_events(fb);
++    xen_be_send_notify(&fb->xendev);
++
++    if (fb->evt_reply) {
++        xenfb_send_event(fb, fb->evt_reply);
++        qemu_free(fb->evt_reply);
++        fb->evt_reply = NULL;
++    }
++}
++
++static void fb_frontend_changed(struct XenDevice *xendev, const char *node)
++{
++    struct XenFB *fb = container_of(xendev, struct XenFB, xendev);
++
++    /*
++     * Set state to Connected *again* once the frontend switched
++     * to connected.  We must trigger the watch a second time to
++     * workaround a frontend bug.
++     */
++    if (0 == fb->bug_trigger && 0 == strcmp(node, "state") &&
++        xendev->fe_state == XenbusStateConnected &&
++        xendev->be_state == XenbusStateConnected) {
++        fprintf(stderr, "re-trigger connected (frontend bug)\n");
++        xen_be_set_state(xendev, XenbusStateConnected);
++        fb->bug_trigger = 1; /* only once */
++    }
++}
++
++struct XenDevOps xenfb2_ops = {
++    .size       = sizeof(struct XenFB),
++    .init       = fb_init,
++    .connect    = fb_connect,
++    .disconnect = fb_disconnect,
++    .event      = fb_event,
++    .frontend_changed = fb_frontend_changed,
++};
++
++/* ------------------------------------------------------------------------- */
++/* Qemu specific stuff                                                       */
++/* ------------------------------------------------------------------------- */
++
++static struct XenFB *xen_framebuffer = NULL;
++
++/* The most important superblanker stuff */
++
++uint64_t *xenfb2_get_fbmfns(int *npages)
++{
++    struct XenFB *fb = xen_framebuffer;
++    static uint64_t *fbmfns = NULL;
++    unsigned int i;
++
++    if (!fb || !fb->fb2m)
++        return NULL;
++
++    if (fbmfns)
++        free(fbmfns);
++
++    fbmfns = qemu_malloc(fb->fb_npages * sizeof (uint64_t));
++    for (i = 0; i < fb->fb_npages; i++)
++        fbmfns[i] = fb->fb2m[i];
++
++    *npages = fb->fb_npages;
++    return fbmfns;
++}
++
++void *xenfb2_get_pixels(void)
++{
++    struct XenFB *fb = xen_framebuffer;
++
++    if (!fb)
++        return NULL;
++    return fb->pixels;
++}
++
++
++static void xenfb2_update(void *opaque)
++{
++    struct XenFB *fb = opaque;
++    int i;
++    struct DisplayChangeListener *l;
++    int x, y, w, h;
++
++    if (!fb->xres || !fb->yres)
++        return;
++
++    /* resize if needed */
++    if (fb->xres != ds_get_width(fb->ds) ||
++        fb->yres != ds_get_height(fb->ds) ||
++        fb->bpp != ds_get_bits_per_pixel(fb->ds) ||
++        fb->linesize != ds_get_linesize(fb->ds) ||
++        fb->pixels != ds_get_data(fb->ds)) {
++        switch (fb->bpp) {
++        case 16:
++        case 32:
++            /* console.c supported depth -> buffer can be used directly */
++            qemu_free_displaysurface(fb->ds);
++            fb->ds->surface = qemu_create_displaysurface_from(fb->xres,
++                                                              fb->yres,
++                                                              fb->bpp,
++                                                              fb->linesize,
++                                                              fb->pixels);
++            break;
++        default:
++            /* we must convert stuff */
++            qemu_resize_displaysurface(fb->ds, fb->xres, fb->yres);
++            break;
++        }
++        dpy_resize(fb->ds);
++        fprintf(stderr, "update: resizing: %dx%d\n",
++                      fb->xres, fb->yres);
++    }
++
++    /* Will there be a need to optimize this ? */
++    x = y = 0;
++    w = fb->xres;
++    h = fb->yres;
++
++    if (!is_buffer_shared(fb->ds->surface)) {
++        /* Pixel munging and stuffs */
++    }
++
++    dpy_update(fb->ds, x, y, w, h);
++}
++
++static void xenfb2_invalidate(void *opaque)
++{
++    struct XenFB *xenfb = opaque;
++
++    /* What do ? */
++}
++
++extern void xenkbd_set_display_type(int domid, DisplayState *ds);
++
++void xenfb2_set_display(int domid)
++{
++    struct XenDevice *xendev = xen_be_find_xendev("vfb", domid, 0);
++    struct XenFB *fb = container_of(xendev, struct XenFB, xendev);
++    DisplayState *ds = graphic_console_init(xenfb2_update,
++                                            xenfb2_invalidate,
++                                            NULL,
++                                            NULL,
++                                            fb);
++
++    xen_framebuffer = fb;
++    fb->ds = ds;
++    xen_be_check_state(xendev);
++
++    xenkbd_set_display_type(domid, ds);
++}
++
+diff --git a/intel_dbus.c b/intel_dbus.c
+index a5f12e2..d61f766 100644
+--- a/intel_dbus.c
++++ b/intel_dbus.c
+@@ -43,7 +43,7 @@ extern uint64_t xen_vga_vram_gfmn;
+ static int intel_is_xenfb(void)
+ {
+     int n;
+-    return !!xenfb_get_fbmfns(&n);
++    return !!xenfb2_get_fbmfns(&n);
+ }
+ 
+ static int intel_is_vga(void)
+@@ -70,7 +70,7 @@ static void intel_screenshot(struct DisplayState *s, const char *filename,
+     }
+ 
+     if (intel_is_xenfb()) {
+-        data = xenfb_get_pixels();
++        data = xenfb2_get_pixels();
+         flags |= QEMU_SCREENSHOT_BGR;
+     } else if (intel_is_vga()) {
+         flags |= QEMU_SCREENSHOT_BGR;
+@@ -162,7 +162,7 @@ static void intel_iommu_map(void)
+         uint64_t *xenfb_mfns;
+ 
+         INTEL_DEBUG("xenfb_map\n");
+-        xenfb_mfns = xenfb_get_fbmfns(&nbpages);
++        xenfb_mfns = xenfb2_get_fbmfns(&nbpages);
+         mfns = malloc(sizeof (xen_pfn_t) * nbpages);
+         for (i = 0; i < nbpages; i++)
+             mfns[i] = xenfb_mfns[i];
+diff --git a/xen-hooks.mak b/xen-hooks.mak
+index 6b35928..4026888 100644
+--- a/xen-hooks.mak
++++ b/xen-hooks.mak
+@@ -36,6 +36,7 @@ OBJS += xen_machine_pv.o
+ OBJS += xen_backend.o
+ OBJS += xenmou.o
+ OBJS += xenfb.o
++OBJS += xenfb2.o
+ OBJS += xen_console.o
+ OBJS += xen_machine_fv.o
+ OBJS += exec-dm.o
