@@ -575,7 +575,6 @@ static irqreturn_t xenfb2_event_handler(int rq, void *priv)
             xenfb2_update_fb2m(info, event->update_fb2m.start, event->update_fb2m.end);
             break;
         case XENFB2_TYPE_UPDATE_DIRTY:
-            info->cache_attr = _PAGE_CACHE_WB;
             xenfb2_update_dirty(info);
             break;
         case XENFB2_TYPE_FB_CACHING:
