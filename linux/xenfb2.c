@@ -87,8 +87,12 @@ struct xenfb2_info
 
     struct list_head            mappings;
     struct mutex                mm_lock;
-    unsigned long               cache_attr;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,18,0))
+    enum page_cache_mode        cache_attr;
+#else
+    unsigned long               cache_attr;
+#endif
     wait_queue_head_t           thread_wq;
     struct task_struct          *kthread;
     unsigned long               thread_flags;
@@ -228,6 +232,20 @@ static int xenfb2_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
     if (pgnr >= info->fb_npages)
         return VM_FAULT_SIGBUS;
 
+    /*
+     * Contraption to change the cache policy from xenfb2.
+     * To have the vm_page_prot taken in account with _PAGE_CHG_MASK including (PCD | PWT),
+     * we cannot touch anything before and including fb_mmap() as pgprot_modify() will be called
+     * later in the path (mm/mmap.c) and mask _PAGE_CHG_MASK.
+     * Changing the policy in the vm_fault handler seems to be the best compromise for now.
+     */
+    if ((pgprot_val(vma->vm_page_prot) & _PAGE_CACHE_MASK) !=
+            cachemode2protval(info->cache_attr)) {
+        pgprot_val(vma->vm_page_prot) =
+            (pgprot_val(vma->vm_page_prot) & ~_PAGE_CACHE_MASK) |
+            cachemode2protval(info->cache_attr);
+    }
+
     page = info->fb_pages[pgnr].page;
     get_page(page);
 
@@ -297,8 +315,10 @@ static int xenfb2_mmap(struct fb_info *fb_info, struct vm_area_struct *vma)
 #endif
     vma->vm_private_data = map;
 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0))
     vma->vm_page_prot = __pgprot((pgprot_val(vma->vm_page_prot) &
                                   ~_PAGE_CACHE_MASK) | info->cache_attr);
+#endif
 
     return 0;
 }
@@ -467,8 +487,10 @@ static int xenfb2_thread(void *data)
 
             zap_page_range(vma, vma->vm_start, vma->vm_end - vma->vm_start,
                            NULL);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0))
             vma->vm_page_prot = __pgprot((pgprot_val(vma->vm_page_prot) &
                                           ~_PAGE_CACHE_MASK) | info->cache_attr);
+#endif
         }
         mutex_unlock(&info->mm_lock);
 
@@ -537,7 +559,7 @@ static void xenfb2_fb_caching(struct xenfb2_info *info,
         case XEN_DOMCTL_MEM_CACHEATTR_UCM:
             info->cache_attr = _PAGE_CACHE_UC_MINUS;
                 break;
-	default:
+        default:
             return;
     }
 #else
@@ -548,6 +570,7 @@ static void xenfb2_fb_caching(struct xenfb2_info *info,
     set_bit(0, &info->thread_flags);
     wake_up_interruptible(&info->thread_wq);
 }
+
 
 static irqreturn_t xenfb2_event_handler(int rq, void *priv)
 {
@@ -819,7 +842,11 @@ xenfb2_probe(struct xenbus_device *dev,
     if (!info->shared_page)
         goto fail_nomem;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,18,0))
+    info->cache_attr = _PAGE_CACHE_MODE_WC;
+#else
     info->cache_attr = _PAGE_CACHE_WC;
+#endif
 
     fb_info = framebuffer_alloc(sizeof(u32) * 256, NULL);
     if (!fb_info)
