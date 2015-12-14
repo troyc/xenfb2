@@ -24,6 +24,7 @@
 #include <linux/fb.h>
 #include <xen/interface/io/protocols.h>
 #include <linux/version.h>
+#include <linux/vmalloc.h>
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33))
 #include <asm/xen/page.h>
