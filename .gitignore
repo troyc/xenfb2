@@ -1,0 +1,7 @@
+linux/.tmp_versions
+linux/.*.cmd
+linux/*.symvers
+linux/*.order
+linux/*.ko
+linux/*.mod.c
+linux/*.o
