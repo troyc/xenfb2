@@ -270,7 +270,7 @@ static int xenfb2_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 #endif
     set_bit(pgnr, &info->shadow_bitmap[0]);
 
-    return VM_FAULT_MINOR;
+    return 0;
 }
 
 static struct vm_operations_struct xenfb2_vm_ops = {
