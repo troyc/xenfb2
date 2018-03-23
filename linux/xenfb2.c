@@ -222,12 +222,21 @@ static void xenfb2_vm_close(struct vm_area_struct *vma)
     }
     mutex_unlock(&info->mm_lock);
 }
-
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0))
+static int xenfb2_vm_fault(struct vm_fault *vmf)
+{
+    struct vm_area_struct *vma = vmf->vma;
+#else
 static int xenfb2_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
+#endif
     struct xenfb2_mapping *map = vma->vm_private_data;
     struct xenfb2_info *info = map->info;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0))
+    int pgnr = ((long)vmf->address - vma->vm_start) >> PAGE_SHIFT;
+#else
     int pgnr = ((long)vmf->virtual_address - vma->vm_start) >> PAGE_SHIFT;
+#endif
     struct page *page;
 
     if (pgnr >= info->fb_npages)
@@ -486,8 +495,11 @@ static int xenfb2_thread(void *data)
         list_for_each_entry(map, &info->mappings, link) {
             struct vm_area_struct *vma = map->vma;
 
-            zap_page_range(vma, vma->vm_start, vma->vm_end - vma->vm_start,
-                           NULL);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0))
+            zap_page_range(vma, vma->vm_start, vma->vm_end - vma->vm_start);
+#else
+            zap_page_range(vma, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
+#endif
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0))
             vma->vm_page_prot = __pgprot((pgprot_val(vma->vm_page_prot) &
                                           ~_PAGE_CACHE_MASK) | info->cache_attr);
