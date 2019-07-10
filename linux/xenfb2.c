@@ -30,6 +30,7 @@
 #include <asm/xen/page.h>
 #include <xen/events.h>
 #include <xen/page.h>
+#include <xen/platform_pci.h>
 #else
 #include <linux/mm.h>
 #include <asm/page.h>
@@ -1077,20 +1078,14 @@ static struct xenbus_driver xenfb2_driver = {
 
 static int __init xenfb2_init(void)
 {
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33))
-    if (!xen_pv_domain())
-#else
-    if (!is_running_on_xen())
-#endif
+    if (!xen_domain())
         return -ENODEV;
 
-    /* Nothing to do if running in dom0. */
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33))
     if (xen_initial_domain())
-#else
-    if (is_initial_xendomain())
-#endif
-	return -ENODEV;
+        return -ENODEV;
+
+    if (!xen_has_pv_devices())
+        return -ENODEV;
 
     return xenbus_register_frontend(&xenfb2_driver);
 }
