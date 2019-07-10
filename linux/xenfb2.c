@@ -29,6 +29,7 @@
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33))
 #include <asm/xen/page.h>
 #include <xen/events.h>
+#include <xen/page.h>
 #else
 #include <linux/mm.h>
 #include <asm/page.h>
@@ -533,7 +534,7 @@ static void xenfb2_update_fb2m(struct xenfb2_info *info, unsigned int start,
 
     for (pagenr = start; pagenr <= end; pagenr++)
     {
-        unsigned long pfn = page_to_pfn(info->fb_pages[pagenr].page);
+        unsigned long pfn = page_to_xen_pfn(info->fb_pages[pagenr].page);
         unsigned long mfn = info->fb2m[pagenr];
 
         set_phys_to_machine(pfn, mfn);
@@ -969,7 +970,7 @@ static int xenfb2_remove(struct xenbus_device *dev)
 
 static unsigned long vmalloc_to_mfn(void *p)
 {
-    return pfn_to_mfn(page_to_pfn(vmalloc_to_page(p)));
+    return pfn_to_mfn(page_to_xen_pfn(vmalloc_to_page(p)));
 }
 
 static void xenfb2_init_shared_page(struct xenfb2_info *info,
@@ -981,7 +982,7 @@ static void xenfb2_init_shared_page(struct xenfb2_info *info,
     for (i = 0; i < info->fb_npages; i++) {
         info->fb_pages[i].page = vmalloc_to_page((char *)info->fb + i * PAGE_SIZE);
         info->fb_pages[i].orig_mfn = info->fb2m[i] =
-            pfn_to_mfn(page_to_pfn(info->fb_pages[i].page));
+            pfn_to_mfn(page_to_xen_pfn(info->fb_pages[i].page));
     }
 
     page->in_cons = page->in_prod = 0;
@@ -1034,7 +1035,7 @@ static void xenfb2_backend_changed(struct xenbus_device *dev,
             unsigned int i;
 
             for (i = 0; i < info->fb_npages; i++) {
-                unsigned long pfn = page_to_pfn(info->fb_pages[i].page);
+                unsigned long pfn = page_to_xen_pfn(info->fb_pages[i].page);
                 unsigned long mfn = info->fb_pages[i].orig_mfn;
 
                 info->fb2m[i] = mfn;
