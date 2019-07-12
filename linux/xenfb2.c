@@ -65,12 +65,6 @@ struct xenfb2_modeinfo
     unsigned int                pitch;
 };
 
-struct xenfb2_fb_page
-{
-    struct page                 *page;
-    unsigned long               orig_mfn;
-};
-
 struct xenfb2_info
 {
     int                         irq;
@@ -79,7 +73,7 @@ struct xenfb2_info
 
     int                         fb_npages;
     void                        *fb;
-    struct xenfb2_fb_page       *fb_pages;
+    struct page                 **fb_pages;
     int                         fb2m_npages;
     unsigned long               *fb2m;
 
@@ -258,7 +252,7 @@ static int xenfb2_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
             cachemode2protval(info->cache_attr);
     }
 
-    page = info->fb_pages[pgnr].page;
+    page = info->fb_pages[pgnr];
     get_page(page);
 
     vmf->page = page;
@@ -773,7 +767,7 @@ xenfb2_probe(struct xenbus_device *dev,
     memset(info->fb, 0, info->fb_size);
 
     info->fb_npages = (info->fb_size + PAGE_SIZE - 1) >> PAGE_SHIFT;
-    info->fb_pages = kmalloc(sizeof (struct xenfb2_fb_page) * info->fb_npages,
+    info->fb_pages = kcalloc(info->fb_npages, sizeof (info->fb_pages[0]),
                              GFP_KERNEL);
     if (!info->fb_pages)
         goto fail_nomem;
@@ -936,8 +930,7 @@ static void xenfb2_init_shared_page(struct xenfb2_info *info,
         struct page *page = vmalloc_to_page((void*)vaddr);
         unsigned long mfn = page_to_mfn(page);
 
-        info->fb_pages[i].page = page;
-        info->fb_pages[i].orig_mfn = mfn;
+        info->fb_pages[i] = page;
         info->fb2m[i] = mfn;
     }
 
@@ -992,22 +985,6 @@ static void xenfb2_backend_changed(struct xenbus_device *dev,
         /* Re-send framebuffer geometry */
         if (info && info->fb_info)
             xenfb2_set_par(info->fb_info);
-
-        /* Reset FB2M */
-        if (info) {
-            unsigned int i;
-
-            for (i = 0; i < info->fb_npages; i++) {
-                unsigned long pfn = page_to_xen_pfn(info->fb_pages[i].page);
-                unsigned long mfn = info->fb_pages[i].orig_mfn;
-
-                info->fb2m[i] = mfn;
-                set_phys_to_machine(pfn, mfn);
-            }
-
-            set_bit(0, &info->thread_flags);
-            wake_up_interruptible(&info->thread_wq);
-        }
 
         break;
     case XenbusStateClosing:
