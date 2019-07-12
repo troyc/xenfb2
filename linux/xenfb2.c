@@ -531,42 +531,6 @@ static void xenfb2_update_dirty(struct xenfb2_info *info)
     wake_up_interruptible(&info->thread_wq);
 }
 
-static void xenfb2_fb_caching(struct xenfb2_info *info,
-                              unsigned long cache_attr)
-{
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33))
-    switch (cache_attr) {
-        case XEN_DOMCTL_MEM_CACHEATTR_UC:
-            info->cache_attr = _PAGE_CACHE_UC;
-            break;
-        case XEN_DOMCTL_MEM_CACHEATTR_WC:
-            info->cache_attr = _PAGE_CACHE_WC;
-                break;
-        case XEN_DOMCTL_MEM_CACHEATTR_WT:
-            info->cache_attr = _PAGE_CACHE_WT;
-                break;
-        case XEN_DOMCTL_MEM_CACHEATTR_WP:
-            info->cache_attr = _PAGE_CACHE_WP;
-                break;
-        case XEN_DOMCTL_MEM_CACHEATTR_WB:
-            info->cache_attr = _PAGE_CACHE_WB;
-                break;
-        case XEN_DOMCTL_MEM_CACHEATTR_UCM:
-            info->cache_attr = _PAGE_CACHE_UC_MINUS;
-                break;
-        default:
-            return;
-    }
-#else
-    printk("xenfb2: xenfb2_fb_caching has been called. This is not supposed to happen\n");
-    printk("xenfb2: Please report this to surfman/xenfb2 developpers.\n");
-#endif
-
-    set_bit(0, &info->thread_flags);
-    wake_up_interruptible(&info->thread_wq);
-}
-
-
 static irqreturn_t xenfb2_event_handler(int rq, void *priv)
 {
     struct xenfb2_info *info = priv;
@@ -596,7 +560,7 @@ static irqreturn_t xenfb2_event_handler(int rq, void *priv)
             xenfb2_update_dirty(info);
             break;
         case XENFB2_TYPE_FB_CACHING:
-            xenfb2_fb_caching(info, event->fb_caching.cache_attr);
+            pr_err("XENFB2_TYPE_FB_CACHING is deprecated.\n");
             break;
         default:
             break;
