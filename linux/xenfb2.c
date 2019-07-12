@@ -969,34 +969,52 @@ static int xenfb2_remove(struct xenbus_device *dev)
     return 0;
 }
 
+static unsigned long page_to_mfn(struct page *page)
+{
+    return pfn_to_mfn(page_to_xen_pfn(page));
+}
+
 static unsigned long vmalloc_to_mfn(void *p)
 {
-    return pfn_to_mfn(page_to_xen_pfn(vmalloc_to_page(p)));
+    return page_to_mfn(vmalloc_to_page(p));
 }
 
 static void xenfb2_init_shared_page(struct xenfb2_info *info,
                                     struct fb_info * fb_info)
 {
-    struct xenfb2_page *page = info->shared_page;
+    struct xenfb2_page *spage = info->shared_page;
+    unsigned long pfb = (unsigned long)info->fb;
+    unsigned long pfb2m = (unsigned long)info->fb2m;
     int i;
 
     for (i = 0; i < info->fb_npages; i++) {
-        info->fb_pages[i].page = vmalloc_to_page((char *)info->fb + i * PAGE_SIZE);
-        info->fb_pages[i].orig_mfn = info->fb2m[i] =
-            pfn_to_mfn(page_to_xen_pfn(info->fb_pages[i].page));
+        unsigned long vaddr = pfb + (i << PAGE_SHIFT);
+        struct page *page = vmalloc_to_page((void*)vaddr);
+        unsigned long mfn = page_to_mfn(page);
+
+        info->fb_pages[i].page = page;
+        info->fb_pages[i].orig_mfn = mfn;
+        info->fb2m[i] = mfn;
     }
 
-    page->in_cons = page->in_prod = 0;
-    page->out_cons = page->out_prod = 0;
+    spage->in_cons = spage->in_prod = 0;
+    spage->out_cons = spage->out_prod = 0;
 
-    page->fb_size = info->fb_size;
-    page->fb2m_nents = info->fb_npages;
+    spage->fb_size = info->fb_size;
+    spage->fb2m_nents = info->fb_npages;
 
     for (i = 0; i < info->fb2m_npages; i++) {
-        page->fb2m[i] = vmalloc_to_mfn((char *)info->fb2m + i * PAGE_SIZE);
+        unsigned long vaddr = pfb2m + (i << PAGE_SHIFT);
+        unsigned long mfn = vmalloc_to_mfn((void*)vaddr);
+
+        /* The fb2m mfns, not the mfns of the fb pfns?
+         * xenfb uses pd[256] in shared page to map:
+         *     PAGE_SIZE / sizeof (unsigned long) "pages"
+         */
+        spage->fb2m[i] = mfn;
     }
 
-    page->dirty_bitmap_page = vmalloc_to_mfn((char *)info->dirty_bitmap);
+    spage->dirty_bitmap_page = vmalloc_to_mfn((char *)info->dirty_bitmap);
 }
 
 static void xenfb2_backend_changed(struct xenbus_device *dev,
