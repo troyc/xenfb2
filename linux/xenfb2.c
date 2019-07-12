@@ -525,26 +525,6 @@ static int xenfb2_thread(void *data)
     return 0;
 }
 
-static void xenfb2_update_fb2m(struct xenfb2_info *info, unsigned int start,
-                               unsigned int end)
-{
-    unsigned int pagenr;
-
-    start = min_t(unsigned int, start, info->fb_size >> PAGE_SHIFT);
-    end = min_t(unsigned int, end, (info->fb_size - 1) >> PAGE_SHIFT);
-
-    for (pagenr = start; pagenr <= end; pagenr++)
-    {
-        unsigned long pfn = page_to_xen_pfn(info->fb_pages[pagenr].page);
-        unsigned long mfn = info->fb2m[pagenr];
-
-        set_phys_to_machine(pfn, mfn);
-    }
-
-    set_bit(0, &info->thread_flags);
-    wake_up_interruptible(&info->thread_wq);
-}
-
 static void xenfb2_update_dirty(struct xenfb2_info *info)
 {
     set_bit(0, &info->thread_flags);
@@ -610,7 +590,7 @@ static irqreturn_t xenfb2_event_handler(int rq, void *priv)
             wake_up_interruptible(&info->checkvar_wait);
             break;
         case XENFB2_TYPE_UPDATE_FB2M:
-            xenfb2_update_fb2m(info, event->update_fb2m.start, event->update_fb2m.end);
+            pr_err("XENFB2_TYPE_UPDATE_FB2M is deprecated.\n");
             break;
         case XENFB2_TYPE_UPDATE_DIRTY:
             xenfb2_update_dirty(info);
