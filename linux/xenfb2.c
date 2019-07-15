@@ -229,9 +229,9 @@ static int xenfb2_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
     struct xenfb2_mapping *map = vma->vm_private_data;
     struct xenfb2_info *info = map->info;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0))
-    int pgnr = ((long)vmf->address - vma->vm_start) >> PAGE_SHIFT;
+    int pgnr = (vmf->address - vma->vm_start) >> PAGE_SHIFT;
 #else
-    int pgnr = ((long)vmf->virtual_address - vma->vm_start) >> PAGE_SHIFT;
+    int pgnr = (vmf->virtual_address - vma->vm_start) >> PAGE_SHIFT;
 #endif
     struct page *page;
 
