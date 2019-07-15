@@ -413,20 +413,23 @@ static int xenfb2_setcolreg(unsigned regno, unsigned red, unsigned green,
     if (regno > info->cmap.len)
         return 1;
 
-    red >>= (16 - info->var.red.length);
-    green >>= (16 - info->var.green.length);
-    blue >>= (16 - info->var.blue.length);
+#define CNVT_TOHW(val, width) ((((val)<<(width))+0x7FFF-(val))>>16)
+    red = CNVT_TOHW(red, info->var.red.length);
+    green = CNVT_TOHW(green, info->var.green.length);
+    blue = CNVT_TOHW(blue, info->var.blue.length);
+    transp = CNVT_TOHW(transp, info->var.transp.length);
+#undef CNVT_TOHW
 
     v = (red << info->var.red.offset) |
         (green << info->var.green.offset) |
         (blue << info->var.blue.offset);
 
     switch (info->var.bits_per_pixel) {
-    case 16:
-    case 24:
-    case 32:
-	((u32 *)info->pseudo_palette)[regno] = v;
-	break;
+        case 16:
+        case 24:
+        case 32:
+            ((u32 *)info->pseudo_palette)[regno] = v;
+            break;
     }
 
     return 0;
