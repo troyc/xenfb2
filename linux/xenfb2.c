@@ -29,6 +29,8 @@
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33))
 #include <asm/xen/page.h>
 #include <xen/events.h>
+#include <xen/page.h>
+#include <xen/platform_pci.h>
 #else
 #include <linux/mm.h>
 #include <asm/page.h>
@@ -63,12 +65,6 @@ struct xenfb2_modeinfo
     unsigned int                pitch;
 };
 
-struct xenfb2_fb_page
-{
-    struct page                 *page;
-    unsigned long               orig_mfn;
-};
-
 struct xenfb2_info
 {
     int                         irq;
@@ -77,7 +73,7 @@ struct xenfb2_info
 
     int                         fb_npages;
     void                        *fb;
-    struct xenfb2_fb_page       *fb_pages;
+    struct page                 **fb_pages;
     int                         fb2m_npages;
     unsigned long               *fb2m;
 
@@ -233,9 +229,9 @@ static int xenfb2_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
     struct xenfb2_mapping *map = vma->vm_private_data;
     struct xenfb2_info *info = map->info;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0))
-    int pgnr = ((long)vmf->address - vma->vm_start) >> PAGE_SHIFT;
+    int pgnr = (vmf->address - vma->vm_start) >> PAGE_SHIFT;
 #else
-    int pgnr = ((long)vmf->virtual_address - vma->vm_start) >> PAGE_SHIFT;
+    int pgnr = (vmf->virtual_address - vma->vm_start) >> PAGE_SHIFT;
 #endif
     struct page *page;
 
@@ -256,7 +252,7 @@ static int xenfb2_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
             cachemode2protval(info->cache_attr);
     }
 
-    page = info->fb_pages[pgnr].page;
+    page = info->fb_pages[pgnr];
     get_page(page);
 
     vmf->page = page;
@@ -417,20 +413,23 @@ static int xenfb2_setcolreg(unsigned regno, unsigned red, unsigned green,
     if (regno > info->cmap.len)
         return 1;
 
-    red >>= (16 - info->var.red.length);
-    green >>= (16 - info->var.green.length);
-    blue >>= (16 - info->var.blue.length);
+#define CNVT_TOHW(val, width) ((((val)<<(width))+0x7FFF-(val))>>16)
+    red = CNVT_TOHW(red, info->var.red.length);
+    green = CNVT_TOHW(green, info->var.green.length);
+    blue = CNVT_TOHW(blue, info->var.blue.length);
+    transp = CNVT_TOHW(transp, info->var.transp.length);
+#undef CNVT_TOHW
 
     v = (red << info->var.red.offset) |
         (green << info->var.green.offset) |
         (blue << info->var.blue.offset);
 
     switch (info->var.bits_per_pixel) {
-    case 16:
-    case 24:
-    case 32:
-	((u32 *)info->pseudo_palette)[regno] = v;
-	break;
+        case 16:
+        case 24:
+        case 32:
+            ((u32 *)info->pseudo_palette)[regno] = v;
+            break;
     }
 
     return 0;
@@ -523,67 +522,11 @@ static int xenfb2_thread(void *data)
     return 0;
 }
 
-static void xenfb2_update_fb2m(struct xenfb2_info *info, unsigned int start,
-                               unsigned int end)
-{
-    unsigned int pagenr;
-
-    start = min_t(unsigned int, start, info->fb_size >> PAGE_SHIFT);
-    end = min_t(unsigned int, end, (info->fb_size - 1) >> PAGE_SHIFT);
-
-    for (pagenr = start; pagenr <= end; pagenr++)
-    {
-        unsigned long pfn = page_to_pfn(info->fb_pages[pagenr].page);
-        unsigned long mfn = info->fb2m[pagenr];
-
-        set_phys_to_machine(pfn, mfn);
-    }
-
-    set_bit(0, &info->thread_flags);
-    wake_up_interruptible(&info->thread_wq);
-}
-
 static void xenfb2_update_dirty(struct xenfb2_info *info)
 {
     set_bit(0, &info->thread_flags);
     wake_up_interruptible(&info->thread_wq);
 }
-
-static void xenfb2_fb_caching(struct xenfb2_info *info,
-                              unsigned long cache_attr)
-{
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33))
-    switch (cache_attr) {
-        case XEN_DOMCTL_MEM_CACHEATTR_UC:
-            info->cache_attr = _PAGE_CACHE_UC;
-            break;
-        case XEN_DOMCTL_MEM_CACHEATTR_WC:
-            info->cache_attr = _PAGE_CACHE_WC;
-                break;
-        case XEN_DOMCTL_MEM_CACHEATTR_WT:
-            info->cache_attr = _PAGE_CACHE_WT;
-                break;
-        case XEN_DOMCTL_MEM_CACHEATTR_WP:
-            info->cache_attr = _PAGE_CACHE_WP;
-                break;
-        case XEN_DOMCTL_MEM_CACHEATTR_WB:
-            info->cache_attr = _PAGE_CACHE_WB;
-                break;
-        case XEN_DOMCTL_MEM_CACHEATTR_UCM:
-            info->cache_attr = _PAGE_CACHE_UC_MINUS;
-                break;
-        default:
-            return;
-    }
-#else
-    printk("xenfb2: xenfb2_fb_caching has been called. This is not supposed to happen\n");
-    printk("xenfb2: Please report this to surfman/xenfb2 developpers.\n");
-#endif
-
-    set_bit(0, &info->thread_flags);
-    wake_up_interruptible(&info->thread_wq);
-}
-
 
 static irqreturn_t xenfb2_event_handler(int rq, void *priv)
 {
@@ -608,13 +551,13 @@ static irqreturn_t xenfb2_event_handler(int rq, void *priv)
             wake_up_interruptible(&info->checkvar_wait);
             break;
         case XENFB2_TYPE_UPDATE_FB2M:
-            xenfb2_update_fb2m(info, event->update_fb2m.start, event->update_fb2m.end);
+            pr_err("XENFB2_TYPE_UPDATE_FB2M is deprecated.\n");
             break;
         case XENFB2_TYPE_UPDATE_DIRTY:
             xenfb2_update_dirty(info);
             break;
         case XENFB2_TYPE_FB_CACHING:
-            xenfb2_fb_caching(info, event->fb_caching.cache_attr);
+            pr_err("XENFB2_TYPE_FB_CACHING is deprecated.\n");
             break;
         default:
             break;
@@ -827,7 +770,7 @@ xenfb2_probe(struct xenbus_device *dev,
     memset(info->fb, 0, info->fb_size);
 
     info->fb_npages = (info->fb_size + PAGE_SIZE - 1) >> PAGE_SHIFT;
-    info->fb_pages = kmalloc(sizeof (struct xenfb2_fb_page) * info->fb_npages,
+    info->fb_pages = kcalloc(info->fb_npages, sizeof (info->fb_pages[0]),
                              GFP_KERNEL);
     if (!info->fb_pages)
         goto fail_nomem;
@@ -906,7 +849,7 @@ xenfb2_probe(struct xenbus_device *dev,
 
     ret = register_framebuffer(fb_info);
     if (ret) {
-        fb_dealloc_cmap(&info->fb_info->cmap);
+        fb_dealloc_cmap(&fb_info->cmap);
         framebuffer_release(fb_info);
         xenbus_dev_fatal(dev, ret, "register_framebuffer");
         goto fail;
@@ -967,34 +910,51 @@ static int xenfb2_remove(struct xenbus_device *dev)
     return 0;
 }
 
+static unsigned long page_to_mfn(struct page *page)
+{
+    return pfn_to_mfn(page_to_xen_pfn(page));
+}
+
 static unsigned long vmalloc_to_mfn(void *p)
 {
-    return pfn_to_mfn(page_to_pfn(vmalloc_to_page(p)));
+    return page_to_mfn(vmalloc_to_page(p));
 }
 
 static void xenfb2_init_shared_page(struct xenfb2_info *info,
                                     struct fb_info * fb_info)
 {
-    struct xenfb2_page *page = info->shared_page;
+    struct xenfb2_page *spage = info->shared_page;
+    unsigned long pfb = (unsigned long)info->fb;
+    unsigned long pfb2m = (unsigned long)info->fb2m;
     int i;
 
     for (i = 0; i < info->fb_npages; i++) {
-        info->fb_pages[i].page = vmalloc_to_page((char *)info->fb + i * PAGE_SIZE);
-        info->fb_pages[i].orig_mfn = info->fb2m[i] =
-            pfn_to_mfn(page_to_pfn(info->fb_pages[i].page));
+        unsigned long vaddr = pfb + (i << PAGE_SHIFT);
+        struct page *page = vmalloc_to_page((void*)vaddr);
+        unsigned long mfn = page_to_mfn(page);
+
+        info->fb_pages[i] = page;
+        info->fb2m[i] = mfn;
     }
 
-    page->in_cons = page->in_prod = 0;
-    page->out_cons = page->out_prod = 0;
+    spage->in_cons = spage->in_prod = 0;
+    spage->out_cons = spage->out_prod = 0;
 
-    page->fb_size = info->fb_size;
-    page->fb2m_nents = info->fb_npages;
+    spage->fb_size = info->fb_size;
+    spage->fb2m_nents = info->fb_npages;
 
     for (i = 0; i < info->fb2m_npages; i++) {
-        page->fb2m[i] = vmalloc_to_mfn((char *)info->fb2m + i * PAGE_SIZE);
+        unsigned long vaddr = pfb2m + (i << PAGE_SHIFT);
+        unsigned long mfn = vmalloc_to_mfn((void*)vaddr);
+
+        /* The fb2m mfns, not the mfns of the fb pfns?
+         * xenfb uses pd[256] in shared page to map:
+         *     PAGE_SIZE / sizeof (unsigned long) "pages"
+         */
+        spage->fb2m[i] = mfn;
     }
 
-    page->dirty_bitmap_page = vmalloc_to_mfn((char *)info->dirty_bitmap);
+    spage->dirty_bitmap_page = vmalloc_to_mfn((char *)info->dirty_bitmap);
 }
 
 static void xenfb2_backend_changed(struct xenbus_device *dev,
@@ -1029,22 +989,6 @@ static void xenfb2_backend_changed(struct xenbus_device *dev,
         if (info && info->fb_info)
             xenfb2_set_par(info->fb_info);
 
-        /* Reset FB2M */
-        if (info) {
-            unsigned int i;
-
-            for (i = 0; i < info->fb_npages; i++) {
-                unsigned long pfn = page_to_pfn(info->fb_pages[i].page);
-                unsigned long mfn = info->fb_pages[i].orig_mfn;
-
-                info->fb2m[i] = mfn;
-                set_phys_to_machine(pfn, mfn);
-            }
-
-            set_bit(0, &info->thread_flags);
-            wake_up_interruptible(&info->thread_wq);
-        }
-
         break;
     case XenbusStateClosing:
         // FIXME is this safe in any dev->state?
@@ -1076,20 +1020,14 @@ static struct xenbus_driver xenfb2_driver = {
 
 static int __init xenfb2_init(void)
 {
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33))
-    if (!xen_pv_domain())
-#else
-    if (!is_running_on_xen())
-#endif
+    if (!xen_domain())
         return -ENODEV;
 
-    /* Nothing to do if running in dom0. */
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33))
     if (xen_initial_domain())
-#else
-    if (is_initial_xendomain())
-#endif
-	return -ENODEV;
+        return -ENODEV;
+
+    if (!xen_has_pv_devices())
+        return -ENODEV;
 
     return xenbus_register_frontend(&xenfb2_driver);
 }
